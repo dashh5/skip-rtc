@@ -1,0 +1,27 @@
+# Configuration file for https://skip.tools project
+skip:
+  mode: transpile
+  bridging:
+    "org.webrtc.__": "org.webrtc:google-webrtc:1.0.32006"  
+
+settings:
+  contents:
+    - block: 'dependencyResolutionManagement'
+      contents:
+        - block: 'versionCatalogs'
+          contents:
+            - block: 'create("libs")'
+              contents:
+                - 'version("google-webrtc", "1.0.32006")'
+                - 'library("google-webrtc", "org.webrtc", "google-webrtc").versionRef("google-webrtc")'
+        - block: 'repositories'
+          contents:
+            - 'mavenCentral()'
+            - 'google()'
+
+build:
+  contents:
+    - block: 'dependencies'
+      export: false
+      contents:
+        - 'implementation(libs.google.webrtc)'
