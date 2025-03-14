@@ -417,7 +417,7 @@ private class SkipWebRTCObserverImpl: org.webrtc.PeerConnection.Observer {
         }
     }
     
-    //override func onIceCandidatesRemoved(candidates: [org.webrtc.IceCandidate]) {}
+    override func onIceCandidatesRemoved(candidates: java.util.ArrayList<org.webrtc.IceCandidate>) {}
     override func onIceConnectionReceivingChange(recieving: Bool) {}
     override func onSignalingChange(newState: org.webrtc.PeerConnection.SignalingState) {}
     override func onIceGatheringChange(newState: org.webrtc.PeerConnection.IceGatheringState) {}
