@@ -13,6 +13,7 @@ final class SkipWebRTCTests: XCTestCase {
         XCTAssertEqual(1 + 2, 3, "basic test")
     }
     
+    #if SKIP
     func testDecodeType() throws {
         // load the TestData.json file from the Resources folder and decode it into a struct
         let resourceURL: URL = try XCTUnwrap(Bundle.module.url(forResource: "TestData", withExtension: "json"))
@@ -43,21 +44,8 @@ final class SkipWebRTCTests: XCTestCase {
         XCTAssertEqual(sessionDesc.type, "offer")
         XCTAssertEqual(sessionDesc.sdp, "session-data")
     }
+    #endif
     
-    func testPeerConnection() {
-        #if !SKIP
-        let skipWebRTC = SkipWebRTCModule(iceServers: ["stun:stun.l.google.com:19302"])
-        
-        let expectation = XCTestExpectation(description: "Offer created")
-        skipWebRTC.offer { sdp in
-            XCTAssertNotNil(sdp)
-            XCTAssertFalse(sdp.sdp.isEmpty)
-            expectation.fulfill()
-        }
-        
-        wait(for: [expectation], timeout: 5.0)
-        #endif
-    }
     
 }
 

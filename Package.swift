@@ -16,7 +16,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://source.skip.tools/skip.git", from: "1.3.2"),
         .package(url: "https://source.skip.tools/skip-foundation.git", from: "1.0.0"),
-	.package(url: "https://github.com/stasel/WebRTC.git", .upToNextMajor(from: "134.0.0"))
+        .package(url: "https://github.com/stasel/WebRTC.git", .upToNextMajor(from: "134.0.0"))
     ],
     targets: [
         .target(name: "SkipWebRTC", dependencies: [

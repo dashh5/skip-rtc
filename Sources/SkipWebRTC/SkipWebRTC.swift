@@ -1,3 +1,4 @@
+#if !SKIP_BRIDGE
 import Foundation
 
 #if !os(Android)
@@ -417,7 +418,7 @@ private class SkipWebRTCObserverImpl: org.webrtc.PeerConnection.Observer {
         }
     }
     
-    // SKIP INSERT: override fun onIceCandidatesRemoved(candidates: kotlin.Array<IceCandidate>?) = Unit
+    // SKIP INSERT: override fun onIceCandidatesRemoved(candidates: kotlin.Array<out IceCandidate>?) = Unit
     override func onIceConnectionReceivingChange(recieving: Bool) {}
     override func onSignalingChange(newState: org.webrtc.PeerConnection.SignalingState) {}
     override func onIceGatheringChange(newState: org.webrtc.PeerConnection.IceGatheringState) {}
@@ -426,4 +427,5 @@ private class SkipWebRTCObserverImpl: org.webrtc.PeerConnection.Observer {
     override func onDataChannel(dataChannel: org.webrtc.DataChannel) {}
     override func onRenegotiationNeeded() {}
 }
+#endif
 #endif
