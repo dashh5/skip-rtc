@@ -44,9 +44,8 @@ final class SkipWebRTCTests: XCTestCase {
         XCTAssertEqual(sessionDesc.sdp, "session-data")
     }
     
-    // Safe WebRTC tests that only run on iOS/macOS
     func testPeerConnection() {
-        #if !SKIP // These tests are skipped when running on Android
+        #if !SKIP
         let skipWebRTC = SkipWebRTCModule(iceServers: ["stun:stun.l.google.com:19302"])
         
         let expectation = XCTestExpectation(description: "Offer created")
