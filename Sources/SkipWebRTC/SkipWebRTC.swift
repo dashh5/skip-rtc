@@ -36,7 +36,10 @@ public enum RTCIceConnectionState: Int {
         case org.webrtc.PeerConnection.IceConnectionState.FAILED: return .failed
         case org.webrtc.PeerConnection.IceConnectionState.DISCONNECTED: return .disconnected
         case org.webrtc.PeerConnection.IceConnectionState.CLOSED: return .closed
-        default: return .new
+        default:
+            // Log unknown state for debugging
+            print("WARNING: Unknown RTCIceConnectionState encountered")
+            return .new
         }
     }
 }
@@ -54,7 +57,9 @@ public enum RTCDataChannelState: Int {
         case org.webrtc.DataChannel.State.OPEN: return .open
         case org.webrtc.DataChannel.State.CLOSING: return .closing
         case org.webrtc.DataChannel.State.CLOSED: return .closed
-        default: return .closed
+        default:
+            print("WARNING: Unknown RTCDataChannelState encountered")
+            return .closed
         }
     }
 }
@@ -67,6 +72,10 @@ public class RTCSessionDescription: KotlinConverting<org.webrtc.SessionDescripti
         self.platformDescription = platformDescription
     }
     
+    public init(type: RTCSessionDescriptionType, sdp: String) {
+        self.platformDescription = org.webrtc.SessionDescription(type.toPlatformType(), sdp)
+    }
+    
     public override func kotlin(nocopy: Bool = false) -> org.webrtc.SessionDescription {
         return platformDescription
     }
@@ -76,7 +85,9 @@ public class RTCSessionDescription: KotlinConverting<org.webrtc.SessionDescripti
         case org.webrtc.SessionDescription.Type.OFFER: return .offer
         case org.webrtc.SessionDescription.Type.ANSWER: return .answer
         case org.webrtc.SessionDescription.Type.PRANSWER: return .prAnswer
-        default: return .offer
+        default:
+            print("WARNING: Unknown RTCSessionDescriptionType")
+            return .offer
         }
     }
     
@@ -108,6 +119,10 @@ public class RTCIceCandidate: KotlinConverting<org.webrtc.IceCandidate> {
         self.platformCandidate = platformCandidate
     }
     
+    public init(sdp: String, sdpMLineIndex: Int32, sdpMid: String) {
+        self.platformCandidate = org.webrtc.IceCandidate(sdpMid, sdpMLineIndex, sdp)
+    }
+    
     public override func kotlin(nocopy: Bool = false) -> org.webrtc.IceCandidate {
         return platformCandidate
     }
@@ -130,6 +145,41 @@ public protocol RTCVideoRenderer {
     func renderFrame(_ frame: RTCVideoFrame)
 }
 
+// Class to store VideoSink reference for removing renderers
+private class RTCVideoSinkWrapper: KotlinConverting<org.webrtc.VideoSink> {
+    public let sink: org.webrtc.VideoSink
+    public let renderer: RTCVideoRenderer
+    
+    init(renderer: RTCVideoRenderer) {
+        self.renderer = renderer
+        // SKIP INSERT:
+        // self.sink = new org.webrtc.VideoSink() {
+        //   @Override
+        //   public void onFrame(org.webrtc.VideoFrame frame) {
+        //     renderer.renderFrame(new RTCVideoFrame(frame));
+        //   }
+        // };
+        self.sink = createVideoSink(renderer)
+    }
+    
+    public override func kotlin(nocopy: Bool = false) -> org.webrtc.VideoSink {
+        return sink
+    }
+}
+
+private func createVideoSink(_ renderer: RTCVideoRenderer) -> org.webrtc.VideoSink {
+    // This is just a placeholder that will be ignored by Skip
+    // The actual implementation is provided by the SKIP INSERT directive above
+    fatalError("This should never be called in Swift")
+    #if SKIP
+    return org.webrtc.VideoSink {
+        override func onFrame(frame: org.webrtc.VideoFrame) {
+            renderer.renderFrame(RTCVideoFrame(frame))
+        }
+    }
+    #endif
+}
+
 // RTCVideoFrame class bridging iOS to Android
 public class RTCVideoFrame: KotlinConverting<org.webrtc.VideoFrame> {
     public let platformFrame: org.webrtc.VideoFrame
@@ -141,27 +191,47 @@ public class RTCVideoFrame: KotlinConverting<org.webrtc.VideoFrame> {
     public override func kotlin(nocopy: Bool = false) -> org.webrtc.VideoFrame {
         return platformFrame
     }
+    
+    public var width: Int32 {
+        return platformFrame.getRotatedWidth()
+    }
+    
+    public var height: Int32 {
+        return platformFrame.getRotatedHeight()
+    }
+    
+    public var timestamp: Int64 {
+        return platformFrame.getTimestampNs()
+    }
 }
 
 // RTCDataBuffer class bridging iOS to Android
 public class RTCDataBuffer: KotlinConverting<org.webrtc.DataChannel.Buffer> {
     public let platformBuffer: org.webrtc.DataChannel.Buffer
     public let data: Data
+    public let isBinary: Bool
     
     public init(data: Data, isBinary: Bool) {
         let byteBuffer = java.nio.ByteBuffer.wrap(data.kotlin())
         self.platformBuffer = org.webrtc.DataChannel.Buffer(byteBuffer, isBinary)
         self.data = data
+        self.isBinary = isBinary
     }
     
     public init(_ platformBuffer: org.webrtc.DataChannel.Buffer) {
         self.platformBuffer = platformBuffer
+        self.isBinary = platformBuffer.binary
         
         // Convert ByteBuffer to Data
         let byteBuffer = platformBuffer.data
+        let initialPosition = byteBuffer.position()
         let bytes = byteBuffer.remaining()
         var byteArray = [Byte](repeating: 0, count: bytes)
         byteBuffer.get(byteArray)
+        
+        // Reset ByteBuffer position to not affect other readers
+        byteBuffer.position(initialPosition)
+        
         self.data = Data(kotlin: byteArray.toList().toByteArray())
     }
     
@@ -174,24 +244,19 @@ public class RTCDataBuffer: KotlinConverting<org.webrtc.DataChannel.Buffer> {
 public class RTCDataChannel: KotlinConverting<org.webrtc.DataChannel> {
     public let platformChannel: org.webrtc.DataChannel
     weak var delegate: RTCDataChannelDelegate?
+    private var observer: org.webrtc.DataChannel.Observer?
     
     public init(_ platformChannel: org.webrtc.DataChannel) {
         self.platformChannel = platformChannel
         
-        // Set up observer
-        platformChannel.registerObserver(object : org.webrtc.DataChannel.Observer {
-            override func onBufferedAmountChange(previousAmount: Long) {
-                // Not used in your implementation
-            }
-            
-            override func onStateChange() {
-                delegate?.dataChannelDidChangeState(RTCDataChannel(platformChannel))
-            }
-            
-            override func onMessage(buffer: org.webrtc.DataChannel.Buffer) {
-                delegate?.dataChannel(RTCDataChannel(platformChannel), didReceiveMessageWith: RTCDataBuffer(buffer))
-            }
-        })
+        // Create and store observer to avoid garbage collection issues
+        let observer = createDataChannelObserver()
+        self.observer = observer
+        platformChannel.registerObserver(observer)
+    }
+    
+    deinit {
+        platformChannel.unregisterObserver()
     }
     
     public override func kotlin(nocopy: Bool = false) -> org.webrtc.DataChannel {
@@ -202,6 +267,14 @@ public class RTCDataChannel: KotlinConverting<org.webrtc.DataChannel> {
         return RTCDataChannelState.fromPlatformState(platformChannel.state())
     }
     
+    public var label: String {
+        return platformChannel.label()
+    }
+    
+    public var bufferedAmount: Int64 {
+        return platformChannel.bufferedAmount()
+    }
+    
     public func close() {
         platformChannel.close()
     }
@@ -210,6 +283,33 @@ public class RTCDataChannel: KotlinConverting<org.webrtc.DataChannel> {
         return platformChannel.send(buffer.platformBuffer)
     }
 }
+
+private func createDataChannelObserver() -> org.webrtc.DataChannel.Observer {
+    // This Swift implementation is just a placeholder
+    // The actual implementation is provided by the SKIP INSERT directive
+    #if !SKIP
+    fatalError("This should never be called in native Swift")
+    #else
+    return createObserver()
+    #endif
+}
+
+
+// SKIP INSERT: private fun createObserver(): org.webrtc.DataChannel.Observer {
+// SKIP INSERT:   return object : org.webrtc.DataChannel.Observer {
+// SKIP INSERT:     override fun onBufferedAmountChange(previousAmount: Long) {
+// SKIP INSERT:       // Not used in the current implementation
+// SKIP INSERT:     }
+// SKIP INSERT:
+// SKIP INSERT:     override fun onStateChange() {
+// SKIP INSERT:       delegate?.dataChannelDidChangeState(RTCDataChannel(platformChannel))
+// SKIP INSERT:     }
+// SKIP INSERT:
+// SKIP INSERT:     override fun onMessage(buffer: org.webrtc.DataChannel.Buffer) {
+// SKIP INSERT:       delegate?.dataChannel(RTCDataChannel(platformChannel), didReceiveMessageWith: RTCDataBuffer(buffer))
+// SKIP INSERT:     }
+// SKIP INSERT:   }
+// SKIP INSERT: }
 
 // RTCDataChannelDelegate protocol to match iOS WebRTC
 public protocol RTCDataChannelDelegate: AnyObject {
@@ -246,6 +346,7 @@ public class RTCAudioTrack: KotlinConverting<org.webrtc.AudioTrack> {
 // RTCVideoTrack class bridging iOS to Android
 public class RTCVideoTrack: KotlinConverting<org.webrtc.VideoTrack> {
     public let platformTrack: org.webrtc.VideoTrack
+    private var sinkMap = [ObjectIdentifier: RTCVideoSinkWrapper]()
     
     public init(_ platformTrack: org.webrtc.VideoTrack) {
         self.platformTrack = platformTrack
@@ -269,75 +370,99 @@ public class RTCVideoTrack: KotlinConverting<org.webrtc.VideoTrack> {
     }
     
     public func add(_ renderer: RTCVideoRenderer) {
-        // We need to adapt RTCVideoRenderer to org.webrtc.VideoSink
-        let sink = org.webrtc.VideoSink {
-            override func onFrame(frame: org.webrtc.VideoFrame) {
-                renderer.renderFrame(RTCVideoFrame(frame))
-            }
-        }
-        platformTrack.addSink(sink)
+        let key = ObjectIdentifier(renderer as AnyObject)
+        let wrapper = RTCVideoSinkWrapper(renderer: renderer)
+        sinkMap[key] = wrapper
+        platformTrack.addSink(wrapper.sink)
     }
     
     public func remove(_ renderer: RTCVideoRenderer) {
-        // This is approximate as we don't have direct sink reference
-        // In a full implementation, we'd maintain a map of renderers to sinks
-        // For now we'll assume removal isn't used or will be handled differently
+        let key = ObjectIdentifier(renderer as AnyObject)
+        if let wrapper = sinkMap[key] {
+            platformTrack.removeSink(wrapper.sink)
+            sinkMap.removeValue(forKey: key)
+        }
     }
 }
 
 // RTCVideoCapturer protocol
 public protocol RTCVideoCapturer {
     func stopCapture() async
+    func startCapture(with device: CaptureDevice, format: CaptureFormat, fps: Int)
 }
 
 // RTCCameraVideoCapturer class bridging iOS to Android
 public class RTCCameraVideoCapturer: RTCVideoCapturer, KotlinConverting<org.webrtc.Camera2Capturer> {
     public let platformCapturer: org.webrtc.Camera2Capturer
+    private var surfaceTextureHelper: org.webrtc.SurfaceTextureHelper?
+    private var videoSource: RTCVideoSource?
     
     public init(delegate: RTCVideoSource) {
+        self.videoSource = delegate
         let context = ProcessInfo.processInfo.androidContext
-        // Default to front camera
-        let cameraManager = context.getSystemService(android.content.Context.CAMERA_SERVICE) as! android.hardware.camera2.CameraManager
-        var frontCameraId = ""
         
-        for cameraId in cameraManager.cameraIdList {
-            let characteristics = cameraManager.getCameraCharacteristics(cameraId)
+        // Find a camera
+        let cameraManager = context.getSystemService(android.content.Context.CAMERA_SERVICE) as! android.hardware.camera2.CameraManager
+        var cameraId = ""
+        
+        // Try to find front camera first
+        for id in cameraManager.cameraIdList {
+            let characteristics = cameraManager.getCameraCharacteristics(id)
             let facing = characteristics.get(android.hardware.camera2.CameraCharacteristics.LENS_FACING) as! Int
             if facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT {
-                frontCameraId = cameraId
+                cameraId = id
                 break
             }
         }
         
-        self.platformCapturer = org.webrtc.Camera2Capturer(
-            context,
-            frontCameraId,
-            object : org.webrtc.CameraVideoCapturer.CameraEventsHandler {
-                override func onCameraError(error: String) {
-                    // Log error
-                }
-                
-                override func onCameraDisconnected() {
-                    // Handle disconnection
-                }
-                
-                override func onCameraFreezed(error: String) {
-                    // Handle freeze
-                }
-                
-                override func onCameraOpening(cameraName: String) {
-                    // Camera is opening
-                }
-                
-                override func onFirstFrameAvailable() {
-                    // First frame is available
-                }
-                
-                override func onCameraClosed() {
-                    // Camera closed
-                }
+        // If no front camera, use any available camera
+        if cameraId.isEmpty && cameraManager.cameraIdList.isNotEmpty() {
+            cameraId = cameraManager.cameraIdList[0]
+        }
+        
+        // Create event handler
+        let eventsHandler = org.webrtc.CameraVideoCapturer.CameraEventsHandler {
+            override func onCameraError(error: String) {
+                print("Camera error: \(error)")
             }
-        )
+            
+            override func onCameraDisconnected() {
+                print("Camera disconnected")
+            }
+            
+            override func onCameraFreezed(error: String) {
+                print("Camera freezed: \(error)")
+            }
+            
+            override func onCameraOpening(cameraName: String) {
+                print("Camera opening: \(cameraName)")
+            }
+            
+            override func onFirstFrameAvailable() {
+                print("First camera frame available")
+            }
+            
+            override func onCameraClosed() {
+                print("Camera closed")
+            }
+        }
+        
+        if cameraId.isEmpty {
+            // No camera available, create a dummy capturer
+            print("ERROR: No camera available on this device")
+            // This would cause an error but we need to initialize the variable
+            self.platformCapturer = org.webrtc.Camera2Capturer(
+                context,
+                "0", // This is invalid and would fail
+                eventsHandler
+            )
+        } else {
+            self.platformCapturer = org.webrtc.Camera2Capturer(
+                context,
+                cameraId,
+                eventsHandler
+            )
+        }
     }
     
     public override func kotlin(nocopy: Bool = false) -> org.webrtc.Camera2Capturer {
@@ -364,27 +489,85 @@ public class RTCCameraVideoCapturer: RTCVideoCapturer, KotlinConverting<org.webr
         let cameraManager = context.getSystemService(android.content.Context.CAMERA_SERVICE) as! android.hardware.camera2.CameraManager
         var formats = [CaptureFormat]()
         
-        let characteristics = cameraManager.getCameraCharacteristics(device.deviceId)
-        let streamMap = characteristics.get(android.hardware.camera2.CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-        
-        let outputSizes = streamMap.getOutputSizes(android.graphics.ImageFormat.YUV_420_888)
-        for size in outputSizes {
-            let format = CaptureFormat(width: size.width, height: size.height)
-            formats.append(format)
+        do {
+            let characteristics = cameraManager.getCameraCharacteristics(device.deviceId)
+            if let streamMap = characteristics.get(android.hardware.camera2.CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) {
+                let outputSizes = streamMap.getOutputSizes(android.graphics.ImageFormat.YUV_420_888)
+                
+                for size in outputSizes {
+                    // Create frame rate ranges based on camera capabilities
+                    var frameRateRanges = [FrameRateRange]()
+                    
+                    // Try to get actual supported frame rates if available
+                    if let fpsRanges = characteristics.get(android.hardware.camera2.CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) {
+                        for i in 0..<fpsRanges.size {
+                            let range = fpsRanges.get(i)
+                            frameRateRanges.append(
+                                FrameRateRange(
+                                    minFrameRate: Double(range.lower),
+                                    maxFrameRate: Double(range.upper)
+                                )
+                            )
+                        }
+                    } else {
+                        // Default frame rate range if not available
+                        frameRateRanges.append(FrameRateRange(minFrameRate: 15.0, maxFrameRate: 30.0))
+                    }
+                    
+                    let format = CaptureFormat(
+                        width: size.width,
+                        height: size.height,
+                        frameRateRanges: frameRateRanges
+                    )
+                    formats.append(format)
+                }
+            }
+        } catch {
+            print("Error getting camera formats: \(error)")
         }
         
         return formats
     }
     
     public func startCapture(with device: CaptureDevice, format: CaptureFormat, fps: Int) {
-        let videoSource = org.webrtc.SurfaceTextureHelper.create("WebRTCCameraCaptureThread", null)
-        platformCapturer.initialize(videoSource, ProcessInfo.processInfo.androidContext) {
+        let threadName = "WebRTCCameraCaptureThread"
+        
+        // Clean up any previous resources
+        if let helper = surfaceTextureHelper {
+            helper.dispose()
+        }
+        
+        // Create new surface texture helper
+        self.surfaceTextureHelper = org.webrtc.SurfaceTextureHelper.create(
+            threadName,
+            ProcessInfo.processInfo.androidContext.mainLooper.thread.contextClassLoader
+        )
+        
+        guard let textureHelper = self.surfaceTextureHelper else {
+            print("ERROR: Failed to create SurfaceTextureHelper")
+            return
+        }
+        
+        guard let source = self.videoSource?.platformSource else {
+            print("ERROR: Missing video source for camera capturer")
+            return
+        }
+        
+        platformCapturer.initialize(textureHelper, ProcessInfo.processInfo.androidContext, source) {
             platformCapturer.startCapture(format.width, format.height, fps)
         }
     }
     
     public func stopCapture() async {
+        // Use an async call to match the iOS API
+        // but the Android API is synchronous
         platformCapturer.stopCapture()
+        
+        // Dispose of the texture helper
+        if let helper = surfaceTextureHelper {
+            helper.dispose()
+            surfaceTextureHelper = nil
+        }
     }
 }
 
@@ -409,15 +592,20 @@ public class CaptureFormat {
     public let height: Int
     public let videoSupportedFrameRateRanges: [FrameRateRange]
     
-    public init(width: Int, height: Int) {
+    public init(width: Int, height: Int, frameRateRanges: [FrameRateRange]? = nil) {
         self.width = width
         self.height = height
-        // Default to common frame rates
-        self.videoSupportedFrameRateRanges = [FrameRateRange(minFrameRate: 15.0, maxFrameRate: 30.0)]
+        
+        if let ranges = frameRateRanges, !ranges.isEmpty {
+            self.videoSupportedFrameRateRanges = ranges
+        } else {
+            // Default to common frame rates
+            self.videoSupportedFrameRateRanges = [FrameRateRange(minFrameRate: 15.0, maxFrameRate: 30.0)]
+        }
     }
     
     public var formatDescription: CMFormatDescription {
-        return CMFormatDescription() // Stub - would need more implementation
+        return CMFormatDescription(width: width, height: height)
     }
 }
 
@@ -431,12 +619,18 @@ public class FrameRateRange {
     }
 }
 
-// Stub for CMFormatDescription - would need more implementation
+// Simplified CMFormatDescription for cross-platform compatibility
 public class CMFormatDescription {
-    public init() {}
+    private let width: Int
+    private let height: Int
+    
+    public init(width: Int = 0, height: Int = 0) {
+        self.width = width
+        self.height = height
+    }
     
     public static func getDimensions(_ desc: CMFormatDescription) -> CaptureFormatDimensions {
-        return CaptureFormatDimensions(width: 0, height: 0) // Stub
+        return CaptureFormatDimensions(width: desc.width, height: desc.height)
     }
 }
 
@@ -456,6 +650,29 @@ public class RTCVideoSource: KotlinConverting<org.webrtc.VideoSource> {
     public override func kotlin(nocopy: Bool = false) -> org.webrtc.VideoSource {
         return platformSource
     }
+    
+    public var state: RTCVideoSourceState {
+        let state = platformSource.state()
+        switch state {
+        case org.webrtc.MediaSource.State.LIVE:
+            return .live
+        case org.webrtc.MediaSource.State.ENDED:
+            return .ended
+        case org.webrtc.MediaSource.State.MUTED:
+            return .muted
+        default:
+            print("WARNING: Unknown video source state")
+            return .ended
+        }
+    }
+}
+
+// RTCVideoSourceState enum to match iOS API
+public enum RTCVideoSourceState {
+    case initializing
+    case live
+    case ended
+    case muted
 }
 
 // RTCAudioSource class bridging iOS to Android
@@ -469,11 +686,35 @@ public class RTCAudioSource: KotlinConverting<org.webrtc.AudioSource> {
     public override func kotlin(nocopy: Bool = false) -> org.webrtc.AudioSource {
         return platformSource
     }
+    
+    public var state: RTCAudioSourceState {
+        let state = platformSource.state()
+        switch state {
+        case org.webrtc.MediaSource.State.LIVE:
+            return .live
+        case org.webrtc.MediaSource.State.ENDED:
+            return .ended
+        case org.webrtc.MediaSource.State.MUTED:
+            return .muted
+        default:
+            print("WARNING: Unknown audio source state")
+            return .ended
+        }
+    }
+}
+
+// RTCAudioSourceState enum to match iOS API
+public enum RTCAudioSourceState {
+    case initializing
+    case live
+    case ended
+    case muted
 }
 
 // RTCAudioSession class for audio management
 public class RTCAudioSession {
     private let audioManager: android.media.AudioManager
+    private var audioFocusRequest: android.media.AudioFocusRequest?
     
     private init() {
         self.audioManager = ProcessInfo.processInfo.androidContext.getSystemService(android.content.Context.AUDIO_SERVICE) as! android.media.AudioManager
@@ -494,6 +735,22 @@ public class RTCAudioSession {
         switch category {
         case .playAndRecord:
             audioManager.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
+            
+            // Handle options
+            if options.contains(.defaultToSpeaker) {
+                audioManager.isSpeakerphoneOn = true
+            }
+            
+            // Set audio routing if needed based on mode
+            if let mode = mode {
+                switch mode {
+                case .voiceChat:
+                    audioManager.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
+                case .videoChat:
+                    audioManager.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
+                    audioManager.isSpeakerphoneOn = true
+                }
+            }
         case .playback:
             audioManager.mode = android.media.AudioManager.MODE_NORMAL
         }
@@ -502,25 +759,48 @@ public class RTCAudioSession {
     public func setActive(_ active: Bool) throws {
         // Android doesn't have a direct equivalent, but we can request audio focus
         if active {
-            let audioFocusRequest = android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN)
-                .setAudioAttributes(android.media.AudioAttributes.Builder()
-                    .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build())
-                .setAcceptsDelayedFocusGain(true)
+            // Create AudioAttributes for the focus request
+            let audioAttrs = android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
                 .build()
-            audioManager.requestAudioFocus(audioFocusRequest)
+            
+            // Create the focus request
+            let focusRequest = android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(audioAttrs)
+                .setAcceptsDelayedFocusGain(true)
+                .setOnAudioFocusChangeListener { focusChange in
+                    // Handle focus changes here if needed
+                }
+                .build()
+            
+            // Store the request for later abandoning
+            self.audioFocusRequest = focusRequest
+            
+            // Request audio focus
+            let result = audioManager.requestAudioFocus(focusRequest)
+            if result != android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED {
+                throw NSError(domain: "RTCAudioSession", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to request audio focus"])
+            }
         } else {
-            audioManager.abandonAudioFocus(null)
+            // Abandon audio focus if we have a stored request
+            if let request = audioFocusRequest {
+                audioManager.abandonAudioFocusRequest(request)
+                audioFocusRequest = nil
+            }
         }
     }
     
     public func setPreferredSampleRate(_ sampleRate: Double) throws {
         // Android doesn't expose this level of control
+        // Log that this is ignored on Android
+        print("setPreferredSampleRate not supported on Android")
     }
     
     public func setPreferredIOBufferDuration(_ duration: Double) throws {
         // Android doesn't expose this level of control
+        // Log that this is ignored on Android
+        print("setPreferredIOBufferDuration not supported on Android")
     }
     
     public func overrideOutputAudioPort(_ port: RTCAudioSessionPortOverride) throws {
@@ -557,6 +837,7 @@ public struct RTCAudioSessionCategoryOptions: OptionSet {
     }
     
     public static let defaultToSpeaker = RTCAudioSessionCategoryOptions(rawValue: 1 << 0)
+    public static let allowBluetooth = RTCAudioSessionCategoryOptions(rawValue: 1 << 1)
 }
 
 public enum RTCAudioSessionPortOverride: Int {
@@ -570,7 +851,7 @@ public class RTCAudioSessionRouteDescription {
     public init(audioManager: android.media.AudioManager) {
         var outputs = [RTCAudioSessionPortDescription]()
         
-        // Get current audio devices
+        // Get current audio devices in priority order
         if audioManager.isBluetoothScoOn {
             outputs.append(RTCAudioSessionPortDescription(portType: "BluetoothSCO", portName: "Bluetooth"))
         } else if audioManager.isWiredHeadsetOn {
@@ -598,7 +879,7 @@ public class RTCAudioSessionPortDescription {
 // RTCPeerConnection class bridging iOS to Android
 public class RTCPeerConnection: KotlinConverting<org.webrtc.PeerConnection> {
     public let platformConnection: org.webrtc.PeerConnection
-    private var observer: org.webrtc.PeerConnection.Observer? = nil
+    private var observer: org.webrtc.PeerConnection.Observer?
     public weak var delegate: RTCPeerConnectionDelegate?
     
     public init(platformConnection: org.webrtc.PeerConnection, observer: org.webrtc.PeerConnection.Observer) {
@@ -621,127 +902,184 @@ public class RTCPeerConnection: KotlinConverting<org.webrtc.PeerConnection> {
     }
     
     public func setLocalDescription(_ sdp: RTCSessionDescription) async throws {
-        try kotlinx.coroutines.suspendCancellableCoroutine<Void> { continuation in
-            let observer = org.webrtc.SdpObserver {
-                override func onCreateSuccess(sdp: org.webrtc.SessionDescription?) {
-                    // Not used for setLocalDescription
-                }
-                
-                override func onSetSuccess() {
-                    continuation.resume(Unit, null)
-                }
-                
-                override func onCreateFailure(error: String?) {
-                    // Not used for setLocalDescription
-                }
-                
-                override func onSetFailure(error: String?) {
-                    continuation.resumeWithException(Exception(error ? "Unknown error" : ""))
-                }
-            }
-            
-            platformConnection.setLocalDescription(observer, sdp.platformDescription)
-        }
+        #if !SKIP
+        fatalError("This is a Skip-only implementation")
+        #endif
     }
+
+    // SKIP INSERT: public suspend fun setLocalDescription(sdp: RTCSessionDescription) {
+    // SKIP INSERT:   return kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
+    // SKIP INSERT:     val observer = object : org.webrtc.SdpObserver {
+    // SKIP INSERT:       override fun onCreateSuccess(sdp: org.webrtc.SessionDescription?) {
+    // SKIP INSERT:         // Not used for setLocalDescription
+    // SKIP INSERT:       }
+    // SKIP INSERT:
+    // SKIP INSERT:       override fun onSetSuccess() {
+    // SKIP INSERT:         continuation.resume(Unit)
+    // SKIP INSERT:       }
+    // SKIP INSERT:
+    // SKIP INSERT:       override fun onCreateFailure(error: String?) {
+    // SKIP INSERT:         // Not used for setLocalDescription
+    // SKIP INSERT:       }
+    // SKIP INSERT:
+    // SKIP INSERT:       override fun onSetFailure(error: String?) {
+    // SKIP INSERT:         val errorMessage = error ?: "Unknown error"
+    // SKIP INSERT:         continuation.resumeWithException(Exception(errorMessage))
+    // SKIP INSERT:       }
+    // SKIP INSERT:     }
+    // SKIP INSERT:
+    // SKIP INSERT:     platformConnection.setLocalDescription(observer, sdp.platformDescription)
+    // SKIP INSERT:   }
+    // SKIP INSERT: }
+    
+    public func setRemoteDescription(_ sdp: RTCSessionDescription) async throws {
+        #if !SKIP
+        fatalError("This is a Skip-only implementation")
+        #endif
+    }
+
+    // SKIP INSERT: public suspend fun setRemoteDescription(sdp: RTCSessionDescription) {
+    // SKIP INSERT:   return kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
+    // SKIP INSERT:     val observer = object : org.webrtc.SdpObserver {
+    // SKIP INSERT:       override fun onCreateSuccess(sdp: org.webrtc.SessionDescription?) {
+    // SKIP INSERT:         // Not used for setRemoteDescription
+    // SKIP INSERT:       }
+    // SKIP INSERT:
+    // SKIP INSERT:       override fun onSetSuccess() {
+    // SKIP INSERT:         continuation.resume(Unit)
+    // SKIP INSERT:       }
+    // SKIP INSERT:
+    // SKIP INSERT:       override fun onCreateFailure(error: String?) {
+    // SKIP INSERT:         // Not used for setRemoteDescription
+    // SKIP INSERT:       }
+    // SKIP INSERT:
+    // SKIP INSERT:       override fun onSetFailure(error: String?) {
+    // SKIP INSERT:         val errorMessage = error ?: "Unknown error"
+    // SKIP INSERT:         continuation.resumeWithException(Exception(errorMessage))
+    // SKIP INSERT:       }
+    // SKIP INSERT:     }
+    // SKIP INSERT:
+    // SKIP INSERT:     platformConnection.setRemoteDescription(observer, sdp.platformDescription)
+    // SKIP INSERT:   }
+    // SKIP INSERT: }
     
     public func offer(for constraints: RTCMediaConstraints) async throws -> RTCSessionDescription {
-        return try kotlinx.coroutines.suspendCancellableCoroutine { continuation in
-            let platformConstraints = constraints.platformConstraints
-            let observer = org.webrtc.SdpObserver {
-                override func onCreateSuccess(sdp: org.webrtc.SessionDescription?) {
-                    if (sdp != null) {
-                        continuation.resume(RTCSessionDescription(sdp), null)
-                    } else {
-                        continuation.resumeWithException(Exception("SDP is null"))
-                    }
-                }
-                
-                override func onSetSuccess() {
-                    // Not used for createOffer
-                }
-                
-                override func onCreateFailure(error: String?) {
-                    continuation.resumeWithException(Exception(error ? "Unknown error" : ""))
-                }
-                
-                override func onSetFailure(error: String?) {
-                    // Not used for createOffer
-                }
-            }
-            
-            platformConnection.createOffer(observer, platformConstraints)
-        }
+        #if !SKIP
+        fatalError("This is a Skip-only implementation")
+        #endif
     }
+
+    // SKIP INSERT: public suspend fun offer(constraints: RTCMediaConstraints): RTCSessionDescription {
+    // SKIP INSERT:   return kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
+    // SKIP INSERT:     val platformConstraints = constraints.platformConstraints
+    // SKIP INSERT:     val observer = object : org.webrtc.SdpObserver {
+    // SKIP INSERT:       override fun onCreateSuccess(sdp: org.webrtc.SessionDescription?) {
+    // SKIP INSERT:         if (sdp != null) {
+    // SKIP INSERT:           continuation.resume(RTCSessionDescription(sdp))
+    // SKIP INSERT:         } else {
+    // SKIP INSERT:           continuation.resumeWithException(Exception("SDP is null"))
+    // SKIP INSERT:         }
+    // SKIP INSERT:       }
+    // SKIP INSERT:
+    // SKIP INSERT:       override fun onSetSuccess() {
+    // SKIP INSERT:         // Not used for createOffer
+    // SKIP INSERT:       }
+    // SKIP INSERT:
+    // SKIP INSERT:       override fun onCreateFailure(error: String?) {
+    // SKIP INSERT:         val errorMessage = error ?: "Unknown error"
+    // SKIP INSERT:         continuation.resumeWithException(Exception(errorMessage))
+    // SKIP INSERT:       }
+    // SKIP INSERT:
+    // SKIP INSERT:       override fun onSetFailure(error: String?) {
+    // SKIP INSERT:         // Not used for createOffer
+    // SKIP INSERT:       }
+    // SKIP INSERT:     }
+    // SKIP INSERT:
+    // SKIP INSERT:     platformConnection.createOffer(observer, platformConstraints)
+    // SKIP INSERT:   }
+    // SKIP INSERT: }
     
     public func answer(for constraints: RTCMediaConstraints) async throws -> RTCSessionDescription {
-        return try kotlinx.coroutines.suspendCancellableCoroutine { continuation in
-            let platformConstraints = constraints.platformConstraints
-            let observer = org.webrtc.SdpObserver {
-                override func onCreateSuccess(sdp: org.webrtc.SessionDescription?) {
-                    if (sdp != null) {
-                        continuation.resume(RTCSessionDescription(sdp), null)
-                    } else {
-                        continuation.resumeWithException(Exception("SDP is null"))
-                    }
-                }
-                
-                override func onSetSuccess() {
-                    // Not used for createAnswer
-                }
-                
-                override func onCreateFailure(error: String?) {
-                    continuation.resumeWithException(Exception(error ? "Unknown error" : ""))
-                }
-                
-                override func onSetFailure(error: String?) {
-                    // Not used for createAnswer
-                }
-            }
-            
-            platformConnection.createAnswer(observer, platformConstraints)
-        }
+        #if !SKIP
+        fatalError("This is a Skip-only implementation")
+        #endif
     }
+
+    // SKIP INSERT: public suspend fun answer(constraints: RTCMediaConstraints): RTCSessionDescription {
+    // SKIP INSERT:   return kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
+    // SKIP INSERT:     val platformConstraints = constraints.platformConstraints
+    // SKIP INSERT:     val observer = object : org.webrtc.SdpObserver {
+    // SKIP INSERT:       override fun onCreateSuccess(sdp: org.webrtc.SessionDescription?) {
+    // SKIP INSERT:         if (sdp != null) {
+    // SKIP INSERT:           continuation.resume(RTCSessionDescription(sdp))
+    // SKIP INSERT:         } else {
+    // SKIP INSERT:           continuation.resumeWithException(Exception("SDP is null"))
+    // SKIP INSERT:         }
+    // SKIP INSERT:       }
+    // SKIP INSERT:
+    // SKIP INSERT:       override fun onSetSuccess() {
+    // SKIP INSERT:         // Not used for createAnswer
+    // SKIP INSERT:       }
+    // SKIP INSERT:
+    // SKIP INSERT:       override fun onCreateFailure(error: String?) {
+    // SKIP INSERT:         val errorMessage = error ?: "Unknown error"
+    // SKIP INSERT:         continuation.resumeWithException(Exception(errorMessage))
+    // SKIP INSERT:       }
+    // SKIP INSERT:
+    // SKIP INSERT:       override fun onSetFailure(error: String?) {
+    // SKIP INSERT:         // Not used for createAnswer
+    // SKIP INSERT:       }
+    // SKIP INSERT:     }
+    // SKIP INSERT:
+    // SKIP INSERT:     platformConnection.createAnswer(observer, platformConstraints)
+    // SKIP INSERT:   }
+    // SKIP INSERT: }
     
-    public func offer(for constraints: RTCMediaConstraints, completionHandler: @escaping (_ sdp: RTCSessionDescription?, _ error: Error?) -> Void) {
-        let platformConstraints = constraints.platformConstraints
-        let observer =  org.webrtc.SdpObserver {
-            override func onCreateSuccess(sdp: org.webrtc.SessionDescription?) {
-                DispatchQueue.main.async {
-                    if (sdp != null) {
-                        completionHandler(RTCSessionDescription(sdp), nil)
-                    } else {
-                        completionHandler(nil, NSError(domain: "WebRTC", code: -1, userInfo: [NSLocalizedDescriptionKey: "SDP is null"]))
-                    }
-                }
-            }
-            
-            override func onSetSuccess() {
-                // Not used for createOffer
-            }
-            
-            override func onCreateFailure(error: String?) {
-                DispatchQueue.main.async {
-                    completionHandler(nil, NSError(domain: "WebRTC", code: -1, userInfo: [NSLocalizedDescriptionKey: error ?? "Unknown error"]))
-                }
-            }
-            
-            override func onSetFailure(error: String?) {
-                // Not used for createOffer
-            }
-        }
-        
-        platformConnection.createOffer(observer, platformConstraints)
+    public func offer(for constraints: RTCMediaConstraints) async throws -> RTCSessionDescription {
+        #if !SKIP
+        fatalError("This is a Skip-only implementation")
+        #endif
     }
+
+    // SKIP INSERT: public suspend fun offer(constraints: RTCMediaConstraints): RTCSessionDescription {
+    // SKIP INSERT:   return kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
+    // SKIP INSERT:     val platformConstraints = constraints.platformConstraints
+    // SKIP INSERT:     val observer = object : org.webrtc.SdpObserver {
+    // SKIP INSERT:       override fun onCreateSuccess(sdp: org.webrtc.SessionDescription?) {
+    // SKIP INSERT:         if (sdp != null) {
+    // SKIP INSERT:           continuation.resume(RTCSessionDescription(sdp))
+    // SKIP INSERT:         } else {
+    // SKIP INSERT:           continuation.resumeWithException(Exception("SDP is null"))
+    // SKIP INSERT:         }
+    // SKIP INSERT:       }
+    // SKIP INSERT:
+    // SKIP INSERT:       override fun onSetSuccess() {
+    // SKIP INSERT:         // Not used for createOffer
+    // SKIP INSERT:       }
+    // SKIP INSERT:
+    // SKIP INSERT:       override fun onCreateFailure(error: String?) {
+    // SKIP INSERT:         val errorMessage = error ?: "Unknown error"
+    // SKIP INSERT:         continuation.resumeWithException(Exception(errorMessage))
+    // SKIP INSERT:       }
+    // SKIP INSERT:
+    // SKIP INSERT:       override fun onSetFailure(error: String?) {
+    // SKIP INSERT:         // Not used for createOffer
+    // SKIP INSERT:       }
+    // SKIP INSERT:     }
+    // SKIP INSERT:
+    // SKIP INSERT:     platformConnection.createOffer(observer, platformConstraints)
+    // SKIP INSERT:   }
+    // SKIP INSERT: }
     
     public func answer(for constraints: RTCMediaConstraints, completionHandler: @escaping (_ sdp: RTCSessionDescription?, _ error: Error?) -> Void) {
         let platformConstraints = constraints.platformConstraints
         let observer = org.webrtc.SdpObserver {
             override func onCreateSuccess(sdp: org.webrtc.SessionDescription?) {
                 DispatchQueue.main.async {
-                    if (sdp != null) {
+                    if sdp != null {
                         completionHandler(RTCSessionDescription(sdp), nil)
                     } else {
-                        completionHandler(nil, NSError(domain: "WebRTC", code: -1, userInfo: [NSLocalizedDescriptionKey: "SDP is null"]))
+                        completionHandler(nil, NSError(domain: WebRTCErrorDomain, code: WebRTCErrorCode.sdpCreateFailed.rawValue, userInfo: [NSLocalizedDescriptionKey: "SDP is null"]))
                     }
                 }
             }
@@ -752,7 +1090,7 @@ public class RTCPeerConnection: KotlinConverting<org.webrtc.PeerConnection> {
             
             override func onCreateFailure(error: String?) {
                 DispatchQueue.main.async {
-                    completionHandler(nil, NSError(domain: "WebRTC", code: -1, userInfo: [NSLocalizedDescriptionKey: error ?? "Unknown error"]))
+                    completionHandler(nil, NSError(domain: WebRTCErrorDomain, code: WebRTCErrorCode.sdpCreateFailed.rawValue, userInfo: [NSLocalizedDescriptionKey: error ?? "Unknown error"]))
                 }
             }
             
@@ -767,14 +1105,32 @@ public class RTCPeerConnection: KotlinConverting<org.webrtc.PeerConnection> {
     public func add(_ candidate: RTCIceCandidate, completionHandler: @escaping (Error?) -> Void) {
         platformConnection.addIceCandidate(candidate.platformCandidate) { success in
             DispatchQueue.main.async {
-                if (success) {
+                if success {
                     completionHandler(nil)
                 } else {
-                    completionHandler(NSError(domain: "WebRTC", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to add ICE candidate"]))
+                    completionHandler(NSError(domain: WebRTCErrorDomain, code: WebRTCErrorCode.iceCandidateError.rawValue, userInfo: [NSLocalizedDescriptionKey: "Failed to add ICE candidate"]))
                 }
             }
         }
     }
+    
+    public func add(_ candidate: RTCIceCandidate) async throws {
+        #if !SKIP
+        fatalError("This is a Skip-only implementation")
+        #endif
+    }
+
+    // SKIP INSERT: public suspend fun add(candidate: RTCIceCandidate) {
+    // SKIP INSERT:   val success = kotlinx.coroutines.suspendCancellableCoroutine<Boolean> { continuation ->
+    // SKIP INSERT:     platformConnection.addIceCandidate(candidate.platformCandidate) { success ->
+    // SKIP INSERT:       continuation.resume(success)
+    // SKIP INSERT:     }
+    // SKIP INSERT:   }
+    // SKIP INSERT:
+    // SKIP INSERT:   if (!success) {
+    // SKIP INSERT:     throw Exception("Failed to add ICE candidate")
+    // SKIP INSERT:   }
+    // SKIP INSERT: }
     
     public func removeTrack(_ sender: RTCRtpSender) {
         platformConnection.removeTrack(sender.kotlin())
@@ -794,7 +1150,7 @@ public class RTCPeerConnection: KotlinConverting<org.webrtc.PeerConnection> {
         dataChannelInit.id = configuration.channelId
         
         let platformChannel = platformConnection.createDataChannel(label, dataChannelInit)
-        if (platformChannel != null) {
+        if platformChannel != null {
             return RTCDataChannel(platformChannel)
         }
         return nil
@@ -818,7 +1174,7 @@ public class RTCPeerConnection: KotlinConverting<org.webrtc.PeerConnection> {
             
             override func onSetFailure(error: String?) {
                 DispatchQueue.main.async {
-                    completionHandler(NSError(domain: "WebRTC", code: -1, userInfo: [NSLocalizedDescriptionKey: error ?? "Unknown error"]))
+                    completionHandler(NSError(domain: WebRTCErrorDomain, code: WebRTCErrorCode.sdpSetFailed.rawValue, userInfo: [NSLocalizedDescriptionKey: error ?? "Unknown error"]))
                 }
             }
         }
@@ -842,26 +1198,40 @@ public class RTCPeerConnection: KotlinConverting<org.webrtc.PeerConnection> {
     }
     
     // Statistics
-    public func statistics(_ completionHandler: @escaping ([String: RTCStatisticsReport]) -> Void) {
+    public func statistics(_ completionHandler: @escaping (RTCStatisticsReport) -> Void) {
         platformConnection.getStats { statsReport in
             // Convert Android stats report to iOS-like structure
-            let statsMap = [String: RTCStatisticsReport]()
-            // Implementation would need to convert between report formats
-            // This is a simplified placeholder
+            let convertedReport = RTCStatisticsReport(nativeReport: statsReport)
+            
             DispatchQueue.main.async {
-                completionHandler(statsMap)
+                completionHandler(convertedReport)
             }
         }
     }
+    
+    public func statistics() async -> RTCStatisticsReport {
+        #if !SKIP
+        fatalError("This is a Skip-only implementation")
+        #endif
+    }
+
+    // SKIP INSERT: public suspend fun statistics(): RTCStatisticsReport {
+    // SKIP INSERT:   return kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
+    // SKIP INSERT:     platformConnection.getStats { statsReport ->
+    // SKIP INSERT:       val convertedReport = RTCStatisticsReport(statsReport)
+    // SKIP INSERT:       continuation.resume(convertedReport)
+    // SKIP INSERT:     }
+    // SKIP INSERT:   }
+    // SKIP INSERT: }
 }
 
 // RTCDataChannelConfiguration class for data channel configuration
 public class RTCDataChannelConfiguration {
-    public var isOrdered: Boolean = true
+    public var isOrdered: Bool = true
     public var maxRetransmitTimeMs: Int = -1
     public var maxRetransmits: Int = -1
-    public var protocolName: String = ""
-    public var isNegotiated: Boolean = false
+    public var `protocol`: String = ""
+    public var isNegotiated: Bool = false
     public var channelId: Int = 0
     
     public init() {}
@@ -887,7 +1257,8 @@ public class RTCRtpTransceiver: KotlinConverting<org.webrtc.RtpTransceiver> {
         case org.webrtc.MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO:
             return .video
         default:
-            return .audio // Default fallback
+            print("WARNING: Unknown media type")
+            return .unsupported
         }
     }
     
@@ -898,6 +1269,58 @@ public class RTCRtpTransceiver: KotlinConverting<org.webrtc.RtpTransceiver> {
     public var receiver: RTCRtpReceiver {
         return RTCRtpReceiver(platformTransceiver.receiver)
     }
+    
+    public var direction: RTCRtpTransceiverDirection {
+        let nativeDirection = platformTransceiver.direction
+        switch nativeDirection {
+        case org.webrtc.RtpTransceiver.RtpTransceiverDirection.SEND_RECV:
+            return .sendRecv
+        case org.webrtc.RtpTransceiver.RtpTransceiverDirection.SEND_ONLY:
+            return .sendOnly
+        case org.webrtc.RtpTransceiver.RtpTransceiverDirection.RECV_ONLY:
+            return .recvOnly
+        case org.webrtc.RtpTransceiver.RtpTransceiverDirection.INACTIVE:
+            return .inactive
+        default:
+            print("WARNING: Unknown RTP transceiver direction")
+            return .inactive
+        }
+    }
+    
+    public func setDirection(_ direction: RTCRtpTransceiverDirection) {
+        var nativeDirection: org.webrtc.RtpTransceiver.RtpTransceiverDirection
+        
+        switch direction {
+        case .sendRecv:
+            nativeDirection = org.webrtc.RtpTransceiver.RtpTransceiverDirection.SEND_RECV
+        case .sendOnly:
+            nativeDirection = org.webrtc.RtpTransceiver.RtpTransceiverDirection.SEND_ONLY
+        case .recvOnly:
+            nativeDirection = org.webrtc.RtpTransceiver.RtpTransceiverDirection.RECV_ONLY
+        case .inactive:
+            nativeDirection = org.webrtc.RtpTransceiver.RtpTransceiverDirection.INACTIVE
+        case .stopped:
+            nativeDirection = org.webrtc.RtpTransceiver.RtpTransceiverDirection.INACTIVE
+            // For .stopped, also try to stop the transceiver
+            platformTransceiver.stop()
+            return
+        }
+        
+        platformTransceiver.setDirection(nativeDirection)
+    }
+    
+    public func stop() {
+        platformTransceiver.stop()
+    }
+}
+
+// RTCRtpTransceiverDirection enum
+public enum RTCRtpTransceiverDirection {
+    case sendRecv
+    case sendOnly
+    case recvOnly
+    case inactive
+    case stopped
 }
 
 // RTCRtpMediaType enum
@@ -923,26 +1346,42 @@ public class RTCRtpSender: KotlinConverting<org.webrtc.RtpSender> {
     public var track: RTCMediaStreamTrack? {
         get {
             let track = platformSender.track()
-            if (track == null) {
+            if track == null {
                 return nil
             }
             
-            if (track is org.webrtc.AudioTrack) {
+            if track is org.webrtc.AudioTrack {
                 return RTCAudioTrack(track as! org.webrtc.AudioTrack)
-            } else if (track is org.webrtc.VideoTrack) {
+            } else if track is org.webrtc.VideoTrack {
                 return RTCVideoTrack(track as! org.webrtc.VideoTrack)
             }
             
             return nil
         }
         set {
-            if (newValue == nil) {
+            if newValue == nil {
                 platformSender.setTrack(null, false)
             } else if let audioTrack = newValue as? RTCAudioTrack {
                 platformSender.setTrack(audioTrack.platformTrack, false)
             } else if let videoTrack = newValue as? RTCVideoTrack {
                 platformSender.setTrack(videoTrack.platformTrack, false)
             }
+        }
+    }
+    
+    public var senderId: String {
+        return platformSender.id()
+    }
+    
+    public func setTrack(_ track: RTCMediaStreamTrack?, streamIds: [String]? = nil) -> Bool {
+        let mediaStreamLabels = streamIds?.toList() ?? listOf<String>()
+        
+        if let audioTrack = track as? RTCAudioTrack {
+            return platformSender.setTrack(audioTrack.platformTrack, mediaStreamLabels.isNotEmpty())
+        } else if let videoTrack = track as? RTCVideoTrack {
+            return platformSender.setTrack(videoTrack.platformTrack, mediaStreamLabels.isNotEmpty())
+        } else {
+            return platformSender.setTrack(null, false)
         }
     }
 }
@@ -961,17 +1400,21 @@ public class RTCRtpReceiver: KotlinConverting<org.webrtc.RtpReceiver> {
     
     public var track: RTCMediaStreamTrack? {
         let track = platformReceiver.track()
-        if (track == null) {
+        if track == null {
             return nil
         }
         
-        if (track is org.webrtc.AudioTrack) {
+        if track is org.webrtc.AudioTrack {
             return RTCAudioTrack(track as! org.webrtc.AudioTrack)
-        } else if (track is org.webrtc.VideoTrack) {
+        } else if track is org.webrtc.VideoTrack {
             return RTCVideoTrack(track as! org.webrtc.VideoTrack)
         }
         
         return nil
+    }
+    
+    public var receiverId: String {
+        return platformReceiver.id()
     }
 }
 
@@ -1018,7 +1461,9 @@ public enum RTCSignalingState: Int {
         case org.webrtc.PeerConnection.SignalingState.HAVE_REMOTE_OFFER: return .haveRemoteOffer
         case org.webrtc.PeerConnection.SignalingState.HAVE_REMOTE_PRANSWER: return .haveRemotePrAnswer
         case org.webrtc.PeerConnection.SignalingState.CLOSED: return .closed
-        default: return .stable
+        default:
+            print("WARNING: Unknown signaling state")
+            return .stable
         }
     }
 }
@@ -1034,7 +1479,9 @@ public enum RTCIceGatheringState: Int {
         case org.webrtc.PeerConnection.IceGatheringState.NEW: return .new
         case org.webrtc.PeerConnection.IceGatheringState.GATHERING: return .gathering
         case org.webrtc.PeerConnection.IceGatheringState.COMPLETE: return .complete
-        default: return .new
+        default:
+            print("WARNING: Unknown ICE gathering state")
+            return .new
         }
     }
 }
@@ -1050,11 +1497,91 @@ public class RTCMediaStream: KotlinConverting<org.webrtc.MediaStream> {
     public override func kotlin(nocopy: Bool = false) -> org.webrtc.MediaStream {
         return platformStream
     }
+    
+    public var streamId: String {
+        return platformStream.id
+    }
+    
+    public var audioTracks: [RTCAudioTrack] {
+        return platformStream.audioTracks.map { RTCAudioTrack($0) }
+    }
+    
+    public var videoTracks: [RTCVideoTrack] {
+        return platformStream.videoTracks.map { RTCVideoTrack($0) }
+    }
+    
+    public func addAudioTrack(_ track: RTCAudioTrack) {
+        platformStream.addTrack(track.platformTrack)
+    }
+    
+    public func addVideoTrack(_ track: RTCVideoTrack) {
+        platformStream.addTrack(track.platformTrack)
+    }
+    
+    public func removeAudioTrack(_ track: RTCAudioTrack) {
+        platformStream.removeTrack(track.platformTrack)
+    }
+    
+    public func removeVideoTrack(_ track: RTCVideoTrack) {
+        platformStream.removeTrack(track.platformTrack)
+    }
 }
 
-// RTCStatisticsReport class - simplified placeholder
+// RTCStatisticsReport class
 public class RTCStatisticsReport {
-    // This would need a more complete implementation to match the iOS API
+    private let nativeReport: org.webrtc.RTCStatsReport
+    private var statsMap: [String: RTCStatistics] = [:]
+    
+    internal init(nativeReport: org.webrtc.RTCStatsReport) {
+        self.nativeReport = nativeReport
+        
+        // Convert native stats to Swift stats
+        for statsReport in nativeReport.statsMap.values() {
+            let stats = RTCStatistics(nativeStats: statsReport)
+            statsMap[stats.id] = stats
+        }
+    }
+    
+    public var timestamp: TimeInterval {
+        return TimeInterval(nativeReport.timestamp / 1000) // Convert from microseconds to seconds
+    }
+    
+    public var statistics: [String: RTCStatistics] {
+        return statsMap
+    }
+}
+
+// RTCStatistics class for individual statistics
+public class RTCStatistics {
+    private let nativeStats: org.webrtc.RTCStats
+    private var valueMap: [String: Any] = [:]
+    
+    internal init(nativeStats: org.webrtc.RTCStats) {
+        self.nativeStats = nativeStats
+        
+        // Convert Java map to Swift dictionary
+        for member in nativeStats.members {
+            if member.value != null {
+                valueMap[member.key] = deepSwift(value: member.value)
+            }
+        }
+    }
+    
+    public var id: String {
+        return nativeStats.id
+    }
+    
+    public var timestamp: TimeInterval {
+        return TimeInterval(nativeStats.timestamp / 1000) // Convert from microseconds to seconds
+    }
+    
+    public var type: String {
+        return nativeStats.type
+    }
+    
+    public var values: [String: Any] {
+        return valueMap
+    }
 }
 
 // RTCMediaConstraints class bridging iOS to Android
@@ -1090,7 +1617,18 @@ public let kRTCMediaConstraintsOfferToReceiveVideo = "OfferToReceiveVideo"
 public let kRTCMediaConstraintsValueTrue = "true"
 public let kRTCMediaConstraintsValueFalse = "false"
 
-// WebRTCClient class - the main class from your original implementation
+// Error handling
+public let WebRTCErrorDomain = "WebRTCErrorDomain"
+
+public enum WebRTCErrorCode: Int {
+    case unknown = 0
+    case sdpParseFailed = 1
+    case sdpCreateFailed = 2
+    case sdpSetFailed = 3
+    case iceCandidateError = 4
+}
+
+// WebRTCClient class - the main class
 public final class WebRTCClient: NSObject, Sendable, KotlinConverting<org.webrtc.PeerConnectionFactory> {
     public weak var delegate: WebRTCClientDelegate?
     
@@ -1098,7 +1636,7 @@ public final class WebRTCClient: NSObject, Sendable, KotlinConverting<org.webrtc
     private let rtcAudioSession = RTCAudioSession.sharedInstance
     private let audioQueue = DispatchQueue(label: "audio")
     
-    private var silenceDetectionTimer: Timer?
+    private var silenceDetectionTimer: java.util.Timer?
     private var silenceStartTime: Date?
     
     // Offering to receive both audio and video
@@ -1115,6 +1653,9 @@ public final class WebRTCClient: NSObject, Sendable, KotlinConverting<org.webrtc
     
     // The factory for creating WebRTC components
     private let factory: org.webrtc.PeerConnectionFactory
+    
+    // EGL context
+    private var eglBase: org.webrtc.EglBase?
     
     // Initialize WebRTC on Android
     private static func initializeWebRTC() {
@@ -1133,15 +1674,19 @@ public final class WebRTCClient: NSObject, Sendable, KotlinConverting<org.webrtc
     public init(iceServers: [String]) {
         WebRTCClient.initializeWebRTC()
         
-        // Create factory
+        // Create shared EGL context
+        self.eglBase = org.webrtc.EglBase.create()
+        let eglBaseContext = eglBase?.eglBaseContext
+        
+        // Create factory with video encoder/decoder
         let encoderFactory = org.webrtc.DefaultVideoEncoderFactory(
-            org.webrtc.EglBase.create().eglBaseContext,
-            true,
-            true
+            eglBaseContext,
+            true,  // enable Intel VP8 encoder
+            true   // enable H.264 encoder
         )
         
         let decoderFactory = org.webrtc.DefaultVideoDecoderFactory(
-            org.webrtc.EglBase.create().eglBaseContext
+            eglBaseContext
         )
         
         factory = org.webrtc.PeerConnectionFactory.builder()
@@ -1160,6 +1705,8 @@ public final class WebRTCClient: NSObject, Sendable, KotlinConverting<org.webrtc
         
         rtcConfig.sdpSemantics = org.webrtc.PeerConnection.SdpSemantics.UNIFIED_PLAN
         rtcConfig.continualGatheringPolicy = org.webrtc.PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
+        rtcConfig.enableDtlsSrtp = true
+        rtcConfig.enableRtpDataChannel = true
         
         // Create peer connection constraints
         let constraints = RTCMediaConstraints(
@@ -1171,13 +1718,17 @@ public final class WebRTCClient: NSObject, Sendable, KotlinConverting<org.webrtc
         let observer = org.webrtc.PeerConnection.Observer {
             override func onSignalingChange(state: org.webrtc.PeerConnection.SignalingState) {
                 let swiftState = RTCSignalingState.fromPlatformState(state)
-                delegate?.peerConnection(peerConnection, didChange: swiftState)
+                DispatchQueue.main.async {
+                    delegate?.peerConnection(peerConnection, didChange: swiftState)
+                }
             }
             
             override func onIceConnectionChange(state: org.webrtc.PeerConnection.IceConnectionState) {
                 let swiftState = RTCIceConnectionState.fromPlatformState(state)
-                delegate?.peerConnection(peerConnection, didChange: swiftState)
-                delegate?.webRTCClient(WebRTCClient.this, didChangeConnectionState: swiftState)
+                DispatchQueue.main.async {
+                    delegate?.peerConnection(peerConnection, didChange: swiftState)
+                    delegate?.webRTCClient(self, didChangeConnectionState: swiftState)
+                }
             }
             
             override func onIceConnectionReceivingChange(receiving: Boolean) {
@@ -1186,47 +1737,66 @@ public final class WebRTCClient: NSObject, Sendable, KotlinConverting<org.webrtc
             
             override func onIceGatheringChange(state: org.webrtc.PeerConnection.IceGatheringState) {
                 let swiftState = RTCIceGatheringState.fromPlatformState(state)
-                delegate?.peerConnection(peerConnection, didChange: swiftState)
+                DispatchQueue.main.async {
+                    delegate?.peerConnection(peerConnection, didChange: swiftState)
+                }
             }
             
             override func onIceCandidate(candidate: org.webrtc.IceCandidate) {
                 let swiftCandidate = RTCIceCandidate(candidate)
-                delegate?.peerConnection(peerConnection, didGenerate: swiftCandidate)
-                delegate?.webRTCClient(WebRTCClient.this, didDiscoverLocalCandidate: swiftCandidate)
+                DispatchQueue.main.async {
+                    delegate?.peerConnection(peerConnection, didGenerate: swiftCandidate)
+                    delegate?.webRTCClient(self, didDiscoverLocalCandidate: swiftCandidate)
+                }
             }
             
             override func onIceCandidatesRemoved(candidates: Array<org.webrtc.IceCandidate>) {
-                let swiftCandidates = candidates.map { RTCIceCandidate($0) }.toList().toTypedArray()
-                delegate?.peerConnection(peerConnection, didRemove: swiftCandidates)
+                let swiftCandidates = candidates.map { RTCIceCandidate($0) }
+                DispatchQueue.main.async {
+                    delegate?.peerConnection(peerConnection, didRemove: swiftCandidates)
+                }
             }
             
             override func onAddStream(stream: org.webrtc.MediaStream) {
-                delegate?.peerConnection(peerConnection, didAdd: RTCMediaStream(stream))
+                DispatchQueue.main.async {
+                    delegate?.peerConnection(peerConnection, didAdd: RTCMediaStream(stream))
+                }
             }
             
             override func onRemoveStream(stream: org.webrtc.MediaStream) {
-                delegate?.peerConnection(peerConnection, didRemove: RTCMediaStream(stream))
+                DispatchQueue.main.async {
+                    delegate?.peerConnection(peerConnection, didRemove: RTCMediaStream(stream))
+                }
             }
             
             override func onDataChannel(dataChannel: org.webrtc.DataChannel) {
                 let swiftDataChannel = RTCDataChannel(dataChannel)
+                
+                // Store remote data channel
                 remoteDataChannel = swiftDataChannel
-                delegate?.peerConnection(peerConnection, didOpen: swiftDataChannel)
+                
+                // Set delegate
+                swiftDataChannel.delegate = self
+                
+                DispatchQueue.main.async {
+                    delegate?.peerConnection(peerConnection, didOpen: swiftDataChannel)
+                }
             }
             
             override func onRenegotiationNeeded() {
-                delegate?.peerConnectionShouldNegotiate(peerConnection)
+                DispatchQueue.main.async {
+                    delegate?.peerConnectionShouldNegotiate(peerConnection)
+                }
             }
             
             override func onAddTrack(receiver: org.webrtc.RtpReceiver, streams: Array<org.webrtc.MediaStream>) {
-                if (receiver.track() is org.webrtc.VideoTrack) {
+                if receiver.track() is org.webrtc.VideoTrack {
                     let videoTrack = receiver.track() as! org.webrtc.VideoTrack
                     remoteVideoTrack = RTCVideoTrack(videoTrack)
                 }
                 
-                if (receiver.track() is org.webrtc.AudioTrack) {
-                    let audioTrack = receiver.track() as! org.webrtc.AudioTrack
-                    // Handle audio track reception
+                if receiver.track() is org.webrtc.AudioTrack {
+                    // Handle audio track reception if needed
                 }
             }
         }
@@ -1242,6 +1812,16 @@ public final class WebRTCClient: NSObject, Sendable, KotlinConverting<org.webrtc
         setAudioSession()
     }
     
+    deinit {
+        // Clean up resources
+        silenceDetectionTimer?.cancel()
+        silenceDetectionTimer = nil
+        
+        // Clean up EGL context
+        eglBase?.release()
+        eglBase = nil
+    }
+    
     // MARK: - Signaling
     
     public func offer(completion: @escaping (_ sdp: RTCSessionDescription) -> Void) {
@@ -1249,12 +1829,25 @@ public final class WebRTCClient: NSObject, Sendable, KotlinConverting<org.webrtc
                                              optionalConstraints: nil)
         self.peerConnection.offer(for: constraints) { (sdp, error) in
             guard let sdp = sdp else {
+                print("ERROR: Failed to create offer SDP: \(error?.localizedDescription ?? "Unknown error")")
                 return
             }
             self.peerConnection.setLocalDescription(sdp, completionHandler: { (error) in
+                if let error = error {
+                    print("ERROR: Failed to set local description: \(error.localizedDescription)")
+                    return
+                }
                 completion(sdp)
             })
         }
+    }
+    
+    public func offer() async throws -> RTCSessionDescription {
+        let constraints = RTCMediaConstraints(mandatoryConstraints: self.mediaConstraints,
+                                             optionalConstraints: nil)
+        let sdp = try await self.peerConnection.offer(for: constraints)
+        try await self.peerConnection.setLocalDescription(sdp)
+        return sdp
     }
     
     public func answer(completion: @escaping (_ sdp: RTCSessionDescription) -> Void) {
@@ -1262,45 +1855,94 @@ public final class WebRTCClient: NSObject, Sendable, KotlinConverting<org.webrtc
                                              optionalConstraints: nil)
         self.peerConnection.answer(for: constraints) { (sdp, error) in
             guard let sdp = sdp else {
+                print("ERROR: Failed to create answer SDP: \(error?.localizedDescription ?? "Unknown error")")
                 return
             }
             
             self.peerConnection.setLocalDescription(sdp, completionHandler: { (error) in
+                if let error = error {
+                    print("ERROR: Failed to set local description: \(error.localizedDescription)")
+                    return
+                }
                 completion(sdp)
             })
         }
+    }
+    
+    public func answer() async throws -> RTCSessionDescription {
+        let constraints = RTCMediaConstraints(mandatoryConstraints: self.mediaConstraints,
+                                             optionalConstraints: nil)
+        let sdp = try await self.peerConnection.answer(for: constraints)
+        try await self.peerConnection.setLocalDescription(sdp)
+        return sdp
     }
     
     public func set(remoteSdp: RTCSessionDescription, completion: @escaping (Error?) -> ()) {
         self.peerConnection.setRemoteDescription(remoteSdp, completionHandler: completion)
     }
     
+    public func set(remoteSdp: RTCSessionDescription) async throws {
+        try await self.peerConnection.setRemoteDescription(remoteSdp)
+    }
+    
     public func set(remoteCandidate: RTCIceCandidate, completion: @escaping (Error?) -> ()) {
         self.peerConnection.add(remoteCandidate, completionHandler: completion)
+    }
+    
+    public func set(remoteCandidate: RTCIceCandidate) async throws {
+        try await self.peerConnection.add(remoteCandidate)
     }
     
     // MARK: - Media
     
     public func startCaptureLocalVideo(renderer: RTCVideoRenderer) {
         guard let capturer = self.videoCapturer as? RTCCameraVideoCapturer else {
+            print("ERROR: Video capturer not available or not the correct type")
             return
         }
         
-        guard
-            let frontCamera = (RTCCameraVideoCapturer.captureDevices().first { $0.position == .front }),
-            let format = (RTCCameraVideoCapturer.supportedFormats(for: frontCamera).sorted {
-                let width1 = CMFormatDescription.getDimensions($0.formatDescription).width
-                let width2 = CMFormatDescription.getDimensions($1.formatDescription).width
-                return width1 < width2
-            }).last,
-            let fps = (format.videoSupportedFrameRateRanges.sorted { $0.maxFrameRate < $1.maxFrameRate }.last)
-        else {
+        let devices = RTCCameraVideoCapturer.captureDevices()
+        guard !devices.isEmpty else {
+            print("ERROR: No camera devices found")
             return
         }
         
-        capturer.startCapture(with: frontCamera,
+        // Prefer front camera if available
+        let frontCamera = devices.first { $0.position == .front } ?? devices.first
+        
+        guard let camera = frontCamera else {
+            print("ERROR: No camera available")
+            return
+        }
+        
+        let formats = RTCCameraVideoCapturer.supportedFormats(for: camera)
+        guard !formats.isEmpty else {
+            print("ERROR: No supported formats for camera")
+            return
+        }
+        
+        // Choose a format - prefer higher resolution but not too high
+        // Sort by resolution (width x height)
+        let sortedFormats = formats.sorted {
+            $0.width * $0.height < $1.width * $1.height
+        }
+        
+        // Try to find a good compromise format (720p or closest)
+        let targetResolution = 1280 * 720
+        let format = sortedFormats.min {
+            abs($0.width * $0.height - targetResolution) < abs($1.width * $1.height - targetResolution)
+        } ?? sortedFormats.last!
+        
+        // Find a good framerate
+        let fps = format.videoSupportedFrameRateRanges
+            .sorted { $0.maxFrameRate > $1.maxFrameRate }
+            .first?.maxFrameRate ?? 30.0
+        
+        print("Starting camera capture with format: \(format.width)x\(format.height) @ \(fps) fps")
+        
+        capturer.startCapture(with: camera,
                               format: format,
-                              fps: Int(fps.maxFrameRate))
+                              fps: Int(fps))
         
         self.localVideoTrack?.add(renderer)
     }
@@ -1320,7 +1962,11 @@ public final class WebRTCClient: NSObject, Sendable, KotlinConverting<org.webrtc
         let videoTrack = self.createVideoTrack()
         self.localVideoTrack = videoTrack
         self.peerConnection.add(videoTrack, streamIds: [streamId])
-        self.remoteVideoTrack = self.peerConnection.transceivers.first { $0.mediaType == .video }?.receiver.track as? RTCVideoTrack
+        
+        // Find remote video track
+        self.remoteVideoTrack = self.peerConnection.transceivers.first {
+            $0.mediaType == .video
+        }?.receiver.track as? RTCVideoTrack
         
         // Data
         if let dataChannel = createDataChannel() {
@@ -1366,9 +2012,10 @@ public final class WebRTCClient: NSObject, Sendable, KotlinConverting<org.webrtc
         
         if let dataChannel = self.peerConnection.dataChannel(forLabel: "oai-events", configuration: config) {
             return dataChannel
+        } else {
+            print("ERROR: Failed to create data channel")
+            return nil
         }
-        
-        return nil
     }
     
     public func sendData(_ data: Data) {
@@ -1393,7 +2040,7 @@ public final class WebRTCClient: NSObject, Sendable, KotlinConverting<org.webrtc
         print("DEBUG: Closing WebRTC client and cleaning up resources")
         
         // 1. Stop timers and disable media
-        silenceDetectionTimer?.invalidate()
+        silenceDetectionTimer?.cancel()
         silenceDetectionTimer = nil
         silenceStartTime = nil
         
@@ -1423,23 +2070,21 @@ public final class WebRTCClient: NSObject, Sendable, KotlinConverting<org.webrtc
         }
         rtcAudioSession.unlockForConfiguration()
         
-        // 5. Create and set an empty answer to clean up connection state
-        let cleanupConstraints = RTCMediaConstraints(
-            mandatoryConstraints: [
-                "OfferToReceiveAudio": "false",
-                "OfferToReceiveVideo": "false"
-            ],
-            optionalConstraints: nil
-        )
-        
-        // 6. Remove all transceivers and tracks
+        // 5. Remove all transceivers and tracks
         peerConnection.transceivers.forEach { transceiver in
-            let sender = transceiver.sender
-            sender.track = nil
-            peerConnection.removeTrack(sender)
+            if let sender = transceiver.sender.track {
+                sender.isEnabled = false
+            }
+            
+            let rtpSender = transceiver.sender
+            rtpSender.track = nil
+            peerConnection.removeTrack(rtpSender)
+            
+            // Also stop the transceiver
+            transceiver.stop()
         }
         
-        // 7. Finally close the connection
+        // 6. Finally close the connection
         peerConnection.close()
     }
     
@@ -1451,7 +2096,7 @@ public final class WebRTCClient: NSObject, Sendable, KotlinConverting<org.webrtc
     }
     
     public func unmuteAudio() {
-        print("DEBUG: Unmuting audio.")
+        print("DEBUG: Unmuting audio")
         self.setAudioEnabled(true)
     }
     
@@ -1476,7 +2121,7 @@ public final class WebRTCClient: NSObject, Sendable, KotlinConverting<org.webrtc
                 try self.rtcAudioSession.setCategory(.playAndRecord)
                 try self.rtcAudioSession.overrideOutputAudioPort(.none)
             } catch let error {
-                print("Error setting AVAudioSession category: \(error)")
+                print("Error setting audio session category: \(error)")
             }
             self.rtcAudioSession.unlockForConfiguration()
             self.delegate?.webRTCClient(self, didFinishAudioSessionInit: nil)
@@ -1492,7 +2137,7 @@ public final class WebRTCClient: NSObject, Sendable, KotlinConverting<org.webrtc
             try self.rtcAudioSession.setActive(true)
             try self.rtcAudioSession.overrideOutputAudioPort(.speaker)
             for output in rtcAudioSession.currentRoute.outputs {
-                print("Audio output route (IN setAudioSession):", output.portType, output.portName)
+                print("Audio output route (in setAudioSession):", output.portType, output.portName)
             }
         } catch {
             print("Couldn't force audio to speaker: \(error.localizedDescription)")
@@ -1502,7 +2147,7 @@ public final class WebRTCClient: NSObject, Sendable, KotlinConverting<org.webrtc
     
     // Force audio to speaker
     public func speakerOn() {
-        print("DEBUG: Forcing audio to speaker.")
+        print("DEBUG: Forcing audio to speaker")
         do {
             try self.rtcAudioSession.overrideOutputAudioPort(.speaker)
         } catch {
@@ -1554,11 +2199,24 @@ public final class WebRTCClient: NSObject, Sendable, KotlinConverting<org.webrtc
     // Sends normalized power levels to the completion func.
     public func getAudioStats(trackType: AudioTrackType = .input, completion: @escaping (Double?) -> Void) {
         self.peerConnection.statistics { stats in
-            // This is a simplified placeholder for audio level stats
-            // Need to extract audio level from RTCStatsReport
+            // Try to extract audio level from stats report
+            var level: Double? = nil
+            
+            // Look for audio stats and find the level
+            for (_, stat) in stats.statistics {
+                if stat.type == "media-source" || stat.type == "track" || stat.type == "inbound-rtp" {
+                    if let trackType = stat.values["kind"] as? String, trackType == "audio" {
+                        // Look for audio level
+                        if let audioLevel = stat.values["audioLevel"] as? Double {
+                            level = self.normalizeAudioLevel(audioLevel)
+                            break
+                        }
+                    }
+                }
+            }
+            
             DispatchQueue.main.async {
-                // Default placeholder value
-                completion(0.5)
+                completion(level)
             }
         }
     }
@@ -1590,24 +2248,33 @@ extension WebRTCClient: RTCDataChannelDelegate {
 
 // Factory-level functions
 
-public func RTCInitializeSSL() {
+public func RTCInitializeSSL() -> Bool {
     // No direct equivalent needed on Android as initialization is handled differently
+    // but we return true to maintain API compatibility
+    return true
 }
 
-public class RTCPeerConnectionFactory {
-    public static func factory(encoderFactory: Any, decoderFactory: Any) -> WebRTCClient {
-        fatalError("Use WebRTCClient init method instead")
+public func RTCCleanupSSL() {
+    // No direct equivalent needed on Android
+}
+
+// Helper for Swift/Kotlin conversion
+fileprivate func deepSwift(value: Any) -> Any {
+    if value is String || value is Number || value is Boolean {
+        return value // Return primitive types as-is
+    } else if let map = value as? kotlin.collections.Map<AnyObject, AnyObject> {
+        var dict = [String: Any]()
+        for (key, val) in map {
+            if let keyString = key as? String {
+                dict[keyString] = deepSwift(value: val)
+            }
+        }
+        return dict
+    } else if let list = value as? kotlin.collections.List<AnyObject> {
+        return list.map { deepSwift(value: $0) }
+    } else {
+        return value // Return other types as-is
     }
-}
-
-// MARK: - Helper methods for PeerConnection configuration
-
-public class RTCConfiguration {
-    // This would need proper implementation to match the full iOS API
-}
-
-public func deepSwift<T>(value: T) -> Any {
-    return value
 }
 
 #endif
