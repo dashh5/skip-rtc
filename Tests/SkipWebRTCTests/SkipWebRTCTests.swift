@@ -1,19 +1,19 @@
 import XCTest
-//#if canImport(AndroidLogging)
-//import AndroidLogging
-//#else
-//import OSLog
-//#endif
+#if canImport(AndroidLogging)
+import AndroidLogging
+#else
+import OSLog
+#endif
 import Foundation
 @testable import SkipWebRTC
 
-//let logger: Logger = Logger(subsystem: "SkipWebRTC", category: "Tests")
+let logger: Logger = Logger(subsystem: "SkipWebRTC", category: "Tests")
 
 @available(macOS 13, *)
 final class SkipWebRTCTests: XCTestCase {
     
     func testSkipWebRTC() throws {
-        //logger.log("running testSkipWebRTC")
+        logger.log("running testSkipWebRTC")
         XCTAssertEqual(1 + 2, 3, "basic test")
     }
     
