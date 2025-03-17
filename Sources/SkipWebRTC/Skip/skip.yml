@@ -9,6 +9,8 @@ settings:
               contents:
                 - 'version("google-webrtc", "125.6422.06.1")'
                 - 'library("google-webrtc", "io.github.webrtc-sdk", "android").versionRef("google-webrtc")'
+                - 'library("kotlinx-coroutines-core", "org.jetbrains.kotlinx", "kotlinx-coroutines-core").versionRef("kotlin-coroutines")'
+                - 'library("kotlinx-coroutines-android", "org.jetbrains.kotlinx", "kotlinx-coroutines-android").versionRef("kotlin-coroutines")'
         - block: 'repositories'
           contents:
             - 'mavenCentral()'
@@ -18,3 +20,5 @@ build:
     - block: 'dependencies'
       contents:
         - 'implementation(libs.google.webrtc)'
+        - 'implementation(libs.kotlinx.coroutines.core)'
+        - 'implementation(libs.kotlinx.coroutines.android)'
