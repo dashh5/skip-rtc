@@ -4,7 +4,7 @@
 import Foundation
 import SkipFoundation
 import org.webrtc.__
-import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.__
 
 // Delegate protocol for WebRTC events
 public protocol WebRTCClientDelegate: AnyObject {
@@ -29,17 +29,17 @@ public enum RTCIceConnectionState: Int {
     
     static func fromPlatformState(_ state: org.webrtc.PeerConnection.IceConnectionState) -> RTCIceConnectionState {
         switch state {
-        case org.webrtc.PeerConnection.IceConnectionState.NEW: return .new
-        case org.webrtc.PeerConnection.IceConnectionState.CHECKING: return .checking
-        case org.webrtc.PeerConnection.IceConnectionState.CONNECTED: return .connected
-        case org.webrtc.PeerConnection.IceConnectionState.COMPLETED: return .completed
-        case org.webrtc.PeerConnection.IceConnectionState.FAILED: return .failed
-        case org.webrtc.PeerConnection.IceConnectionState.DISCONNECTED: return .disconnected
-        case org.webrtc.PeerConnection.IceConnectionState.CLOSED: return .closed
+        case org.webrtc.PeerConnection.IceConnectionState.NEW: return RTCIceConnectionState.new
+        case org.webrtc.PeerConnection.IceConnectionState.CHECKING: return RTCIceConnectionState.checking
+        case org.webrtc.PeerConnection.IceConnectionState.CONNECTED: return RTCIceConnectionState.connected
+        case org.webrtc.PeerConnection.IceConnectionState.COMPLETED: return RTCIceConnectionState.completed
+        case org.webrtc.PeerConnection.IceConnectionState.FAILED: return RTCIceConnectionState.failed
+        case org.webrtc.PeerConnection.IceConnectionState.DISCONNECTED: return RTCIceConnectionState.disconnected
+        case org.webrtc.PeerConnection.IceConnectionState.CLOSED: return RTCIceConnectionState.closed
         default:
             // Log unknown state for debugging
             print("WARNING: Unknown RTCIceConnectionState encountered")
-            return .new
+            return RTCIceConnectionState.new
         }
     }
 }
@@ -53,13 +53,13 @@ public enum RTCDataChannelState: Int {
     
     static func fromPlatformState(_ state: org.webrtc.DataChannel.State) -> RTCDataChannelState {
         switch state {
-        case org.webrtc.DataChannel.State.CONNECTING: return .connecting
-        case org.webrtc.DataChannel.State.OPEN: return .open
-        case org.webrtc.DataChannel.State.CLOSING: return .closing
-        case org.webrtc.DataChannel.State.CLOSED: return .closed
+        case org.webrtc.DataChannel.State.CONNECTING: return RTCDataChannelState.connecting
+        case org.webrtc.DataChannel.State.OPEN: return RTCDataChannelState.open
+        case org.webrtc.DataChannel.State.CLOSING: return RTCDataChannelState.closing
+        case org.webrtc.DataChannel.State.CLOSED: return RTCDataChannelState.closed
         default:
             print("WARNING: Unknown RTCDataChannelState encountered")
-            return .closed
+            return RTCDataChannelState.closed
         }
     }
 }
@@ -102,11 +102,11 @@ public enum RTCSessionDescriptionType: Int {
     case prAnswer = 1
     case answer = 2
     
-    func toPlatformType() -> org.webrtc.SessionDescription.Type {
+    func toPlatformType() -> org.webrtc.SessionDescription {
         switch self {
-        case .offer: return org.webrtc.SessionDescription.Type.OFFER
-        case .answer: return org.webrtc.SessionDescription.Type.ANSWER
-        case .prAnswer: return org.webrtc.SessionDescription.Type.PRANSWER
+        case .offer: return org.webrtc.SessionDescription.OFFER
+        case .answer: return org.webrtc.SessionDescription.ANSWER
+        case .prAnswer: return org.webrtc.SessionDescription.PRANSWER
         }
     }
 }
