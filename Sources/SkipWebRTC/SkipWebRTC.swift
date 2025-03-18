@@ -3,6 +3,7 @@
 #if SKIP
 import Foundation
 import SkipFoundation
+import org.webrtc.__
 import kotlinx.coroutines.tasks.await
 
 // Delegate protocol for WebRTC events
